@@ -4,7 +4,8 @@ A browser-based tool that turns raw project requirements into a zero-ambiguity *
 
 ## Features
 
-- **Multiple AI providers:** OpenAI ChatGPT (the default, with GPT-4o), Anthropic Claude and Google Gemini, each with a choice of models.
+- **Multiple AI providers:** OpenAI ChatGPT (the default, with GPT-4o), Anthropic Claude (Opus 5, Sonnet 5, Haiku 4.5) and Google Gemini, each with a choice of models.
+- **Multi-pass generation (default):** an outline pass lists the features and shared data entities, then each feature gets its own request for a full-depth spec (run three at a time), and an assembly pass writes the remaining sections (feature index, consolidated questions register, traceability matrix, commercial sections) around them. This keeps each response within the model's output limit on large projects. A progress view shows each pass, a failed feature is retried once and otherwise flagged in the SOW, and any run can be cancelled. **Single pass** is available for small projects.
 - **Three inputs, each accepting typed text or an uploaded file (`.txt`, `.md`, `.json`):**
   1. **SOW Template:** the section structure the output must follow.
   2. **Raw Project Requirements** (required): features, workflows and user stories.
@@ -13,10 +14,12 @@ A browser-based tool that turns raw project requirements into a zero-ambiguity *
 - **Demo data:** the inputs load pre-filled with a sample project (a multi-tenant inventory dashboard), together with a sample generated SOW, so you can see the expected format straight away.
 - **Per-field Clear buttons**, plus **Load Demo** and **Clear** (all fields) in the header.
 - **SDD System Prompt Config (Advanced):** a collapsible editor for the system prompt sent to the model, with a Reset button. If you leave it empty, the provider's built-in prompt is used.
+- **Analyze → Clarify → Generate:** before writing anything, **Analyze Inputs** asks the model to list every gap, ambiguity and blocker as structured questions, instead of assuming. Answer them (or pick a suggested option) in the **Clarifications** tab, mark any you want to keep open, and generate. Answers are treated as binding decisions, and unanswered questions stay in the SOW's Open Questions register as blockers. **Re-analyze with answers** catches follow-up questions.
+- **Deep, SDD-ready feature specs:** the default prompt and template produce, for every feature, a slug (`<slug>.AC1`, `.API01`, `.UT01`, `.Q01` IDs), business rules with sources, roles and permissions, a proposed data model (fields, types, constraints), an API contract with a full exception table, Given/When/Then acceptance criteria, and spec-derived unit tests, plus a traceability matrix.
 - **Output tabs:**
   - **Rendered Preview:** GitHub-flavoured Markdown rendering, including tables and checklists.
   - **Raw Markdown:** an editable source view; your edits carry through to the preview and the export.
-  - **SDD Audit:** a heuristic readiness score (0–100%) with a pass/fail checklist covering non-goals, acceptance criteria, API specs, measurable SLAs, the Definition of Done and vague language.
+  - **SDD Audit:** a heuristic readiness score (0–100%) with a pass/fail checklist covering non-goals, acceptance criteria and their IDs, API specs, measurable SLAs, the Definition of Ready/Done, vague language, the open questions register, and unresolved blockers. A SOW with open blocking questions is reported as **BLOCKED**, never as passed.
 - **Export:** copy to the clipboard, or download as `STATEMENT_OF_WORK_SDD.md`.
 - **Fence cleanup:** if the model wraps its reply in a ```` ```markdown ```` code fence, the fence is stripped automatically so the preview renders properly.
 
@@ -68,9 +71,10 @@ npm run lint      # run oxlint
 1. Choose a **Provider** and **Model** under *AI Engine Settings*.
 2. Fill in or upload the **SOW Template**, **Raw Project Requirements** and **Additional Constraints**. Click **Load Demo** at any time to see example inputs.
 3. Optionally, paste or upload your **SDD Methodology**, and open **SDD System Prompt Config** to adjust the instructions sent to the model.
-4. Click **Create SOW**.
-5. Review the result in **Rendered Preview**, make small fixes in **Raw Markdown**, and check the **SDD Audit** score.
-6. Use **Copy** or **Download .md** to export.
+4. Click **1. Analyze Inputs**, then answer the questions in the **Clarifications** tab. Use **Re-analyze with answers** to catch follow-ups. (You can also skip straight to step 5.)
+5. Click **2. Create SOW** (or **Generate SOW with answers** in the Clarifications tab).
+6. Review the result in **Rendered Preview**, make small fixes in **Raw Markdown**, and check the **SDD Audit** score.
+7. Use **Copy** or **Download .md** to export.
 
 ## Project Structure
 
@@ -78,13 +82,18 @@ npm run lint      # run oxlint
 src/
 ├── App.tsx                      # Mounts the generator
 ├── ai-sow-generator.tsx         # Main UI: inputs, settings, output tabs
+├── components/
+│   ├── ClarificationsPanel.tsx  # Analysis questions, answers and the regenerate loop
+│   └── GenerationProgressPanel.tsx # Live progress of a multi-pass run
 ├── ai-sow-generator-gemini.tsx  # Earlier single-provider (Gemini) prototype, kept for reference; not mounted
 ├── services/
-│   └── aiProvider.ts            # Provider/model list, system prompt + methodology assembly, generateSOW()
+│   ├── aiProvider.ts            # Provider/model list, callModel(), prompt assembly, analysis, single-pass generation
+│   └── multiPass.ts             # Outline → per-feature → assembly generation pipeline
 ├── data/
 │   └── sowDemoData.ts           # Demo template, requirements, constraints, sample output, default system prompt
 ├── utils/
 │   ├── sddAudit.ts              # SDD readiness scoring heuristics
+│   ├── clarifications.ts        # Answer status helpers and re-analysis merge
 │   └── markdown.ts              # Strips an outer ```markdown fence from model output
 └── types/
     └── sow.ts                   # Shared TypeScript types

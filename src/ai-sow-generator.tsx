@@ -12,13 +12,16 @@ import {
   Eraser,
   Eye,
   FileText,
+  ListChecks,
+  RefreshCw,
   RotateCcw,
+  SearchCheck,
   ShieldCheck,
   Sparkles,
   Terminal,
   X,
 } from "lucide-react";
-import React, { type ChangeEvent, useMemo, useState } from "react";
+import React, { type ChangeEvent, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -28,12 +31,30 @@ import {
   DEMO_SOW_TEMPLATE,
   buildDemoSowOutput,
 } from "./data/sowDemoData";
-import { PROVIDERS, generateSOW } from "./services/aiProvider";
-import type { InputMode, ProviderId } from "./types/sow";
+import ClarificationsPanel from "./components/ClarificationsPanel";
+import GenerationProgressPanel from "./components/GenerationProgressPanel";
+import {
+  PROVIDERS,
+  analyzeRequirements,
+  generateSOW,
+} from "./services/aiProvider";
+import { generateSOWMultiPass } from "./services/multiPass";
+import type {
+  Clarification,
+  FeatureSummary,
+  GenerationMode,
+  GenerationProgress,
+  InputMode,
+  ProviderId,
+} from "./types/sow";
+import {
+  countUnresolvedBlocking,
+  mergeClarifications,
+} from "./utils/clarifications";
 import { unwrapMarkdownFence } from "./utils/markdown";
 import { auditSow } from "./utils/sddAudit";
 
-type OutputTab = "preview" | "code" | "audit";
+type OutputTab = "clarify" | "preview" | "code" | "audit";
 
 // Tailwind styling for the rendered markdown (no typography plugin installed)
 const markdownComponents: Components = {
@@ -56,6 +77,16 @@ const markdownComponents: Components = {
     <h4 className="text-base font-semibold text-cyan-400 mb-2 mt-3">
       {children}
     </h4>
+  ),
+  h5: ({ children }) => (
+    <h5 className="text-sm font-semibold uppercase tracking-wide text-slate-300 mb-2 mt-4">
+      {children}
+    </h5>
+  ),
+  h6: ({ children }) => (
+    <h6 className="text-sm font-semibold text-blue-300 mb-1.5 mt-3">
+      {children}
+    </h6>
   ),
   p: ({ children }) => (
     <p className="my-1.5 text-sm leading-relaxed text-slate-300">{children}</p>
@@ -161,6 +192,7 @@ export default function AiSowGenerator(): React.JSX.Element {
     useState<ProviderId>("openai");
   const [selectedModel, setSelectedModel] = useState<string>("gpt-4o");
   const [customApiKey, setCustomApiKey] = useState<string>("");
+  const [generationMode, setGenerationMode] = useState<GenerationMode>("multi");
 
   // Input States (pre-filled with demo data to show the expected format)
   const [template, setTemplate] = useState<string>(DEMO_SOW_TEMPLATE);
@@ -192,10 +224,46 @@ export default function AiSowGenerator(): React.JSX.Element {
   );
   const [activeTab, setActiveTab] = useState<OutputTab>("preview");
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [progress, setProgress] = useState<GenerationProgress | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  // Aborts the in-flight analysis or generation request(s)
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Clarifications (Analyze -> answer -> Generate loop)
+  const [clarifications, setClarifications] = useState<Clarification[]>([]);
+  const [features, setFeatures] = useState<FeatureSummary[]>([]);
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  // Snapshot of the inputs at the last analysis, to flag stale questions
+  const [analyzedInputs, setAnalyzedInputs] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
 
   const auditResults = useMemo(() => auditSow(sowOutput), [sowOutput]);
+  const auditPassed = !auditResults.blocked && auditResults.score >= 80;
+  const auditTone = auditPassed
+    ? "emerald"
+    : auditResults.blocked
+      ? "red"
+      : "amber";
+
+  const currentInputs = [template, requirements, additional, methodology].join(
+    "\u0000",
+  );
+  const unresolvedBlocking = countUnresolvedBlocking(clarifications);
+  const isBusy = isLoading || isAnalyzing;
+
+  const errorMessage = (err: unknown, fallback: string): string =>
+    err instanceof Error ? err.message : fallback;
+
+  const startRequest = (): AbortSignal => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    return abortRef.current.signal;
+  };
+
+  const handleCancel = (): void => {
+    abortRef.current?.abort();
+  };
 
   // Handle Provider switching
   const handleProviderChange = (e: ChangeEvent<HTMLSelectElement>): void => {
@@ -233,30 +301,108 @@ export default function AiSowGenerator(): React.JSX.Element {
       return;
     }
 
+    const signal = startRequest();
     setIsLoading(true);
     setError("");
+    setWarnings([]);
+    setProgress(null);
+    setActiveTab("preview");
+
+    const params = {
+      provider: selectedProvider,
+      model: selectedModel,
+      template,
+      requirements,
+      additional,
+      methodology,
+      systemPrompt,
+      clarifications,
+      apiKeyOverride: customApiKey.trim() || undefined,
+      signal,
+    };
 
     try {
-      const output = await generateSOW({
+      const result =
+        generationMode === "multi"
+          ? await generateSOWMultiPass(params, features, setProgress)
+          : await generateSOW(params);
+      setSowOutput(unwrapMarkdownFence(result.markdown));
+      setWarnings(result.warnings);
+    } catch (err: unknown) {
+      setError(
+        signal.aborted
+          ? "Generation cancelled. The previous SOW was kept."
+          : errorMessage(
+              err,
+              "An unexpected error occurred while generating the SOW.",
+            ),
+      );
+    } finally {
+      setIsLoading(false);
+      setProgress(null);
+    }
+  };
+
+  // Analyze Action: find gaps and blockers before writing the SOW
+  const handleAnalyze = async (): Promise<void> => {
+    if (!requirements.trim()) {
+      setError("Please provide project requirements before analyzing.");
+      return;
+    }
+
+    const signal = startRequest();
+    setIsAnalyzing(true);
+    setError("");
+    setActiveTab("clarify");
+
+    try {
+      const result = await analyzeRequirements({
         provider: selectedProvider,
         model: selectedModel,
         template,
         requirements,
         additional,
         methodology,
-        systemPrompt,
+        clarifications,
         apiKeyOverride: customApiKey.trim() || undefined,
+        signal,
       });
-      setSowOutput(unwrapMarkdownFence(output));
+      setClarifications((prev) => mergeClarifications(prev, result.questions));
+      setFeatures(result.features);
+      setAnalyzedInputs(currentInputs);
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("An unexpected error occurred while generating the SOW.");
-      }
+      setError(
+        signal.aborted
+          ? "Analysis cancelled."
+          : errorMessage(
+              err,
+              "An unexpected error occurred while analyzing inputs.",
+            ),
+      );
     } finally {
-      setIsLoading(false);
+      setIsAnalyzing(false);
     }
+  };
+
+  const handleUpdateClarification = (
+    id: string,
+    patch: Partial<Clarification>,
+  ): void => {
+    setClarifications((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    );
+  };
+
+  const handleClearAnswers = (): void => {
+    setClarifications((prev) =>
+      prev.map((c) => ({ ...c, answer: "", deferred: false })),
+    );
+  };
+
+  const resetClarifications = (): void => {
+    setClarifications([]);
+    setFeatures([]);
+    setAnalyzedInputs("");
   };
 
   // Download Markdown file
@@ -281,6 +427,8 @@ export default function AiSowGenerator(): React.JSX.Element {
     setAdditional(DEMO_ADDITIONAL_CONSTRAINTS);
     setSystemPrompt(DEFAULT_SDD_SYSTEM_PROMPT);
     setSowOutput(buildDemoSowOutput());
+    setWarnings([]);
+    resetClarifications();
     setError("");
   };
 
@@ -291,6 +439,8 @@ export default function AiSowGenerator(): React.JSX.Element {
     setAdditional("");
     setMethodology("");
     setSowOutput("");
+    setWarnings([]);
+    resetClarifications();
     setError("");
   };
 
@@ -374,6 +524,31 @@ export default function AiSowGenerator(): React.JSX.Element {
                     ))}
                 </select>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">
+                Generation Mode
+              </label>
+              <select
+                value={generationMode}
+                onChange={(e) =>
+                  setGenerationMode(e.target.value as GenerationMode)
+                }
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="multi">
+                  Multi-pass — deep spec per feature (recommended)
+                </option>
+                <option value="single">
+                  Single pass — one request, faster and cheaper
+                </option>
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                {generationMode === "multi"
+                  ? "Outline, then one request per feature, then assembly. Stays within output limits on large projects; costs more requests."
+                  : "Best for small projects. Large SOWs may hit the model's output limit."}
+              </p>
             </div>
 
             <div>
@@ -655,31 +830,86 @@ export default function AiSowGenerator(): React.JSX.Element {
           )}
         </div>
 
-        {/* GENERATE BUTTON */}
-        <div className="p-4 border-t border-slate-800 bg-slate-900">
-          <button
-            onClick={handleGenerate}
-            disabled={isLoading}
-            className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold rounded-lg shadow-lg flex items-center justify-center gap-2 transition-colors"
-          >
-            {isLoading ? (
-              <span>
-                Generating SOW with {selectedProvider.toUpperCase()}...
-              </span>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4" />
-                <span>Create SOW</span>
-              </>
-            )}
-          </button>
+        {/* ANALYZE & GENERATE BUTTONS */}
+        <div className="p-4 border-t border-slate-800 bg-slate-900 space-y-2">
+          <div className="flex gap-2">
+            <button
+              onClick={handleAnalyze}
+              disabled={isBusy}
+              className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-50 text-slate-100 font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors"
+              title="Find missing details, ambiguities and blockers before writing the SOW"
+            >
+              {isAnalyzing ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Analyzing...</span>
+                </>
+              ) : (
+                <>
+                  <SearchCheck className="w-4 h-4 text-cyan-300" />
+                  <span>1. Analyze Inputs</span>
+                </>
+              )}
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={isBusy}
+              className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold rounded-lg shadow-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              {isLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>
+                    Generating with {selectedProvider.toUpperCase()}...
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  <span>2. Create SOW</span>
+                </>
+              )}
+            </button>
+          </div>
+          {isBusy && (
+            <button
+              onClick={handleCancel}
+              className="w-full py-1.5 text-xs text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
+            >
+              Cancel {isAnalyzing ? "analysis" : "generation"}
+            </button>
+          )}
+          <p className="text-[11px] text-slate-500 text-center">
+            {clarifications.length > 0
+              ? `${clarifications.length} clarification question(s) will be sent with the SOW request${unresolvedBlocking ? ` — ${unresolvedBlocking} blocking still unanswered` : ""}.`
+              : "Analyze first to answer open questions, or create the SOW directly."}
+          </p>
         </div>
       </div>
 
       {/* RIGHT COLUMN: OUTPUT PREVIEW */}
       <div className="w-3/5 flex flex-col h-full bg-slate-950">
-        <header className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
-          <div className="flex gap-1 bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-medium">
+        <header className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/50">
+          <div className="flex flex-wrap gap-1 bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-medium">
+            <button
+              onClick={() => setActiveTab("clarify")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-colors ${activeTab === "clarify" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            >
+              <ListChecks className="w-3.5 h-3.5 text-cyan-300" />
+              <span>Clarifications</span>
+              {clarifications.length > 0 && (
+                <span
+                  className={`px-1.5 rounded-full text-[10px] font-bold ${unresolvedBlocking ? "bg-red-500/20 text-red-300" : "bg-emerald-500/20 text-emerald-300"}`}
+                  title={
+                    unresolvedBlocking
+                      ? `${unresolvedBlocking} blocking question(s) unanswered`
+                      : "No unanswered blocking questions"
+                  }
+                >
+                  {unresolvedBlocking || clarifications.length}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => setActiveTab("preview")}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-colors ${activeTab === "preview" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
@@ -701,7 +931,13 @@ export default function AiSowGenerator(): React.JSX.Element {
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
               <span>SDD Audit</span>
               <span
-                className={`px-1.5 rounded-full text-[10px] font-bold ${auditResults.score >= 80 ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}
+                className={`px-1.5 rounded-full text-[10px] font-bold ${
+                  auditTone === "emerald"
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : auditTone === "red"
+                      ? "bg-red-500/20 text-red-300"
+                      : "bg-amber-500/20 text-amber-300"
+                }`}
               >
                 {auditResults.score}%
               </span>
@@ -737,8 +973,42 @@ export default function AiSowGenerator(): React.JSX.Element {
 
         {/* TAB CONTENTS */}
         <div className="flex-1 overflow-y-auto p-6">
+          {/* TAB 0: CLARIFICATIONS */}
+          {activeTab === "clarify" && (
+            <ClarificationsPanel
+              clarifications={clarifications}
+              features={features}
+              isAnalyzing={isAnalyzing}
+              isGenerating={isLoading}
+              inputsChanged={
+                clarifications.length > 0 && analyzedInputs !== currentInputs
+              }
+              onUpdate={handleUpdateClarification}
+              onReanalyze={handleAnalyze}
+              onGenerate={handleGenerate}
+              onClearAnswers={handleClearAnswers}
+            />
+          )}
+
           {/* TAB 1: RENDERED PREVIEW */}
+          {activeTab === "preview" && isLoading && (
+            <GenerationProgressPanel
+              progress={progress}
+              onCancel={handleCancel}
+            />
+          )}
+          {activeTab === "preview" && !isLoading && warnings.length > 0 && (
+            <div className="max-w-4xl mx-auto mb-4 p-3 bg-amber-950/40 border border-amber-800/60 rounded-lg text-xs text-amber-200 space-y-1">
+              {warnings.map((w) => (
+                <p key={w} className="flex items-start gap-1.5">
+                  <span aria-hidden>⚠️</span>
+                  <span>{w}</span>
+                </p>
+              ))}
+            </div>
+          )}
           {activeTab === "preview" &&
+            !isLoading &&
             (sowOutput ? (
               <div className="max-w-4xl mx-auto bg-slate-900/80 border border-slate-800 p-8 rounded-xl shadow-inner">
                 <ReactMarkdown
@@ -781,9 +1051,11 @@ export default function AiSowGenerator(): React.JSX.Element {
                 <div className="flex items-center gap-4">
                   <div
                     className={`w-20 h-20 shrink-0 rounded-full flex items-center justify-center border-4 font-black text-xl ${
-                      auditResults.score >= 80
+                      auditTone === "emerald"
                         ? "border-emerald-500 bg-emerald-950/40 text-emerald-400"
-                        : "border-amber-500 bg-amber-950/40 text-amber-400"
+                        : auditTone === "red"
+                          ? "border-red-500 bg-red-950/40 text-red-400"
+                          : "border-amber-500 bg-amber-950/40 text-amber-400"
                     }`}
                   >
                     {auditResults.score}%
@@ -802,11 +1074,19 @@ export default function AiSowGenerator(): React.JSX.Element {
                     Status
                   </span>
                   <span
-                    className={`text-sm font-bold ${auditResults.score >= 80 ? "text-emerald-400" : "text-amber-400"}`}
+                    className={`text-sm font-bold ${
+                      auditTone === "emerald"
+                        ? "text-emerald-400"
+                        : auditTone === "red"
+                          ? "text-red-400"
+                          : "text-amber-400"
+                    }`}
                   >
-                    {auditResults.score >= 80
+                    {auditPassed
                       ? "PASSED FOR SDD"
-                      : "NEEDS SPEC REFINEMENT"}
+                      : auditResults.blocked
+                        ? "BLOCKED — OPEN QUESTIONS"
+                        : "NEEDS SPEC REFINEMENT"}
                   </span>
                 </div>
               </div>

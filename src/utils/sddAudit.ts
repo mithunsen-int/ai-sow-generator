@@ -12,12 +12,38 @@ export interface AuditResult {
   score: number;
   metrics: AuditMetric[];
   summary: string;
+  /** Open blocking questions remain, so the SOW cannot pass Gate 1. */
+  blocked: boolean;
+  /** Number of details marked "Blocked by <question>". */
+  blockedCount: number;
 }
 
+// Subjective terms that make a criterion untestable
+const VAGUE_TERMS = [
+  "as fast as possible",
+  "super flexible",
+  "user-friendly",
+  "user friendly",
+  "seamless",
+  "intuitive",
+  "state-of-the-art",
+  "best-in-class",
+  "robust",
+];
+
 export const auditSow = (sow: string): AuditResult => {
-  if (!sow) return { score: 0, metrics: [], summary: "No SOW generated yet." };
+  if (!sow)
+    return {
+      score: 0,
+      metrics: [],
+      summary: "No SOW generated yet.",
+      blocked: false,
+      blockedCount: 0,
+    };
 
   const text = sow.toLowerCase();
+  const blockedCount = (sow.match(/blocked by/gi) ?? []).length;
+  const blocked = blockedCount > 0 || /draft\s*[—–-]\s*blocked/i.test(sow);
 
   const metrics: AuditMetric[] = [
     {
@@ -27,7 +53,7 @@ export const auditSow = (sow: string): AuditResult => {
         text.includes("out-of-scope") ||
         text.includes("non-goals") ||
         text.includes("out of scope"),
-      weight: 15,
+      weight: 10,
     },
     {
       title: "Verifiable Acceptance Criteria Table",
@@ -36,7 +62,7 @@ export const auditSow = (sow: string): AuditResult => {
       passed:
         text.includes("|") &&
         (text.includes("acceptance criteria") || text.includes("given")),
-      weight: 20,
+      weight: 15,
     },
     {
       title: "Technical Specs & Endpoint Definitions",
@@ -56,26 +82,50 @@ export const auditSow = (sow: string): AuditResult => {
         /\d+\s*(ms|s|%|reqs)/.test(text) ||
         text.includes("sla") ||
         text.includes("latency"),
-      weight: 15,
+      weight: 10,
     },
     {
-      title: "Definition of Done (DoD) Checklist",
+      title: "Definition of Ready / Done Checklist",
       description:
         "Explicit list of validation steps for specification completion.",
       passed:
         text.includes("[ ]") ||
         text.includes("[x]") ||
-        text.includes("definition of done"),
-      weight: 15,
+        text.includes("definition of done") ||
+        text.includes("definition of ready"),
+      weight: 10,
     },
     {
       title: "Absence of Vague Ambiguities",
       description:
         'Avoids subjective words like "flexible", "easy", or "user-friendly".',
+      passed: !VAGUE_TERMS.some((term) => text.includes(term)),
+      weight: 10,
+    },
+    {
+      title: "Individually IDed Acceptance Criteria",
+      description:
+        "Each criterion carries a stable ID (e.g. <slug>.AC1) so tasks, tests and UAT can reference it.",
+      passed: /\b[a-z0-9-]+\.ac\d+\b/.test(text) || /\bac-?\d+\b/.test(text),
+      weight: 10,
+    },
+    {
+      title: "Open Questions Register",
+      description:
+        "Gaps are listed as questions instead of being silently assumed.",
       passed:
-        !text.includes("as fast as possible") &&
-        !text.includes("super flexible"),
-      weight: 20,
+        text.includes("open questions") ||
+        text.includes("blockers") ||
+        text.includes("ambiguities"),
+      weight: 5,
+    },
+    {
+      title: "No Unresolved Blocking Questions",
+      description: blocked
+        ? `${blockedCount || "Some"} detail(s) are blocked by open questions — answer them in Clarifications and regenerate.`
+        : "No acceptance criteria or specs are blocked by open questions.",
+      passed: !blocked,
+      weight: 15,
     },
   ];
 
@@ -84,9 +134,12 @@ export const auditSow = (sow: string): AuditResult => {
   return {
     score,
     metrics,
-    summary:
-      score >= 80
+    summary: blocked
+      ? "Blocked: the SOW is well structured where specified, but open blocking questions must be answered before Gate 1."
+      : score >= 80
         ? "High SDD Compliance: SOW is ready for specification parsing and automated task breakdown."
         : "Medium/Low Compliance: Add more measurable constraints or explicit acceptance criteria.",
+    blocked,
+    blockedCount,
   };
 };
