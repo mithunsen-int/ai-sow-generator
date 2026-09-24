@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/ai-sow-generator-gemini.tsx","./src/ai-sow-generator.tsx","./src/main.tsx","./src/data/sowdemodata.ts","./src/services/aiprovider.ts","./src/types/sow.ts","./src/utils/sddaudit.ts"],"errors":true,"version":"6.0.3"}
