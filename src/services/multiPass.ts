@@ -27,7 +27,7 @@ const OUTLINE_SYSTEM_PROMPT = `You are a Principal Software Architect planning a
 Produce ONLY the outline that later passes will expand: the list of features and the shared data entities. Do not write specs.
 
 RULES:
-1. One feature = one future spec. Give each a slug: kebab-case, 3–5 words, naming a thing (no verbs), unique.
+1. One feature = one future spec, as the SDD METHODOLOGY defines a spec. Give each an identifier ("slug") following the methodology's identifier rules; if it defines none, use kebab-case, 3–5 words, naming a thing (no verbs), unique.
 2. If a KNOWN FEATURES list is provided, reuse those slugs and names exactly; add a feature only if the inputs clearly require one that is missing.
 3. Never invent features, entities, or behaviour that the inputs do not state or strictly require.
 4. "intent" is one sentence built only from the inputs. "dependsOn" lists slugs of features this one relies on.
@@ -93,7 +93,7 @@ Write ONLY the complete feature specification block for Feature ${index}: "${fea
 - Go deep: every business rule, role permission, data field, endpoint, error case, state transition, edge case, acceptance criterion, and unit test this feature needs.
 - For collections/tables in the OUTLINE: define the full fields only for entities this feature owns; reference other entities by name and owner slug.
 - Reference other features only by slug and ID.
-- Apply every zero-assumption rule. Mark each gap inline with ⚠️ <question-id>, using this feature's IDs (${feature.slug}.Q01, …) or the existing clarification IDs.
+- Apply every zero-assumption rule. Mark each gap inline with ⚠️ <question-id>, using question IDs that follow the SDD METHODOLOGY's identifier rules for this feature (e.g. ${feature.slug}.Q01) or the existing clarification IDs.
 - End the block with a sub-section "##### Open Questions" containing a table with columns | ID | Question | Why It Matters | Options (if known) | Blocking | listing every open question this feature raises or depends on. Omit questions answered in CLARIFICATIONS. If there are none, write "None."
 - Output only this block: no other SOW sections, no intro or outro, and no code fence around it.`;
 

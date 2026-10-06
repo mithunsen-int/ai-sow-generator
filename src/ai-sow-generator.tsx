@@ -1,6 +1,7 @@
 // src/App.tsx
 import {
   AlertTriangle,
+  BookOpen,
   Check,
   CheckCircle,
   CheckSquare,
@@ -13,6 +14,7 @@ import {
   Eye,
   FileText,
   ListChecks,
+  Minimize2,
   RefreshCw,
   RotateCcw,
   SearchCheck,
@@ -27,17 +29,21 @@ import remarkGfm from "remark-gfm";
 import {
   DEFAULT_SDD_SYSTEM_PROMPT,
   DEMO_ADDITIONAL_CONSTRAINTS,
-  DEMO_RAW_REQUIREMENTS,
   DEMO_SOW_TEMPLATE,
-  buildDemoSowOutput,
 } from "./data/sowDemoData";
 import ClarificationsPanel from "./components/ClarificationsPanel";
+import {
+  BUILT_IN_METHODOLOGY_LABEL,
+  DEFAULT_METHODOLOGY_PROFILE,
+  methodologyLabel,
+} from "./data/methodologyProfile";
 import GenerationProgressPanel from "./components/GenerationProgressPanel";
 import {
   PROVIDERS,
   analyzeRequirements,
   generateSOW,
 } from "./services/aiProvider";
+import { condenseMethodology, hashText } from "./services/methodology";
 import { generateSOWMultiPass } from "./services/multiPass";
 import type {
   Clarification,
@@ -194,18 +200,26 @@ export default function AiSowGenerator(): React.JSX.Element {
   const [customApiKey, setCustomApiKey] = useState<string>("");
   const [generationMode, setGenerationMode] = useState<GenerationMode>("multi");
 
-  // Input States (pre-filled with demo data to show the expected format)
+  // Input States (template and constraints pre-filled to show the expected format)
   const [template, setTemplate] = useState<string>(DEMO_SOW_TEMPLATE);
-  const [requirements, setRequirements] = useState<string>(
-    DEMO_RAW_REQUIREMENTS,
-  );
+  const [requirements, setRequirements] = useState<string>("");
   const [additional, setAdditional] = useState<string>(
     DEMO_ADDITIONAL_CONSTRAINTS,
   );
 
-  // Optional SDD methodology describing how the SOW is consumed downstream
-  const [methodology, setMethodology] = useState<string>("");
+  // SDD methodology overrides: empty -> the built-in methodology is used;
+  // otherwise the condensed override replaces it on every pass
+  const [methodologyOverride, setMethodologyOverride] = useState<string>("");
   const [methodologyMode, setMethodologyMode] = useState<InputMode>("text");
+  const [showMethodology, setShowMethodology] = useState<boolean>(false);
+  const [showBuiltInMethodology, setShowBuiltInMethodology] =
+    useState<boolean>(false);
+  // Condensed profile, tied to the override text it was produced from
+  const [condensedMethodology, setCondensedMethodology] = useState<{
+    sourceHash: string;
+    profile: string;
+  } | null>(null);
+  const [isCondensing, setIsCondensing] = useState<boolean>(false);
 
   // SDD System Prompt Config
   const [systemPrompt, setSystemPrompt] = useState<string>(
@@ -219,9 +233,7 @@ export default function AiSowGenerator(): React.JSX.Element {
   const [additionalMode, setAdditionalMode] = useState<InputMode>("text");
 
   // Outputs
-  const [sowOutput, setSowOutput] = useState<string>(() =>
-    buildDemoSowOutput(),
-  );
+  const [sowOutput, setSowOutput] = useState<string>("");
   const [activeTab, setActiveTab] = useState<OutputTab>("preview");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [progress, setProgress] = useState<GenerationProgress | null>(null);
@@ -246,11 +258,29 @@ export default function AiSowGenerator(): React.JSX.Element {
       ? "red"
       : "amber";
 
-  const currentInputs = [template, requirements, additional, methodology].join(
+  const overrideText = methodologyOverride.trim();
+  const overrideHash = useMemo(
+    () => (overrideText ? hashText(overrideText) : ""),
+    [overrideText],
+  );
+  const condensedProfile =
+    overrideText &&
+    condensedMethodology?.sourceHash === overrideHash &&
+    condensedMethodology.profile.trim()
+      ? condensedMethodology.profile
+      : "";
+  const activeMethodologyLabel = !overrideText
+    ? BUILT_IN_METHODOLOGY_LABEL
+    : condensedProfile
+      ? methodologyLabel(condensedProfile)
+      : "Override (not condensed yet)";
+  const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+
+  const currentInputs = [template, requirements, additional, overrideText].join(
     "\u0000",
   );
   const unresolvedBlocking = countUnresolvedBlocking(clarifications);
-  const isBusy = isLoading || isAnalyzing;
+  const isBusy = isLoading || isAnalyzing || isCondensing;
 
   const errorMessage = (err: unknown, fallback: string): string =>
     err instanceof Error ? err.message : fallback;
@@ -263,6 +293,51 @@ export default function AiSowGenerator(): React.JSX.Element {
 
   const handleCancel = (): void => {
     abortRef.current?.abort();
+  };
+
+  /**
+   * The methodology layer for the next request: the built-in profile when no
+   * override is given, otherwise the condensed override (condensing it first,
+   * once, when the override text is new or changed).
+   */
+  const resolveMethodology = async (
+    signal: AbortSignal,
+    force = false,
+  ): Promise<string> => {
+    if (!overrideText) return DEFAULT_METHODOLOGY_PROFILE;
+    if (condensedProfile && !force) return condensedProfile;
+
+    setIsCondensing(true);
+    try {
+      const profile = await condenseMethodology({
+        provider: selectedProvider,
+        model: selectedModel,
+        document: overrideText,
+        apiKeyOverride: customApiKey.trim() || undefined,
+        signal,
+      });
+      setCondensedMethodology({ sourceHash: overrideHash, profile });
+      return profile;
+    } finally {
+      setIsCondensing(false);
+    }
+  };
+
+  const handleCondense = async (): Promise<void> => {
+    const signal = startRequest();
+    setError("");
+    try {
+      await resolveMethodology(signal, true);
+    } catch (err: unknown) {
+      setError(
+        signal.aborted
+          ? "Condensing cancelled."
+          : errorMessage(
+              err,
+              "An unexpected error occurred while condensing the methodology.",
+            ),
+      );
+    }
   };
 
   // Handle Provider switching
@@ -308,20 +383,19 @@ export default function AiSowGenerator(): React.JSX.Element {
     setProgress(null);
     setActiveTab("preview");
 
-    const params = {
-      provider: selectedProvider,
-      model: selectedModel,
-      template,
-      requirements,
-      additional,
-      methodology,
-      systemPrompt,
-      clarifications,
-      apiKeyOverride: customApiKey.trim() || undefined,
-      signal,
-    };
-
     try {
+      const params = {
+        provider: selectedProvider,
+        model: selectedModel,
+        template,
+        requirements,
+        additional,
+        methodology: await resolveMethodology(signal),
+        systemPrompt,
+        clarifications,
+        apiKeyOverride: customApiKey.trim() || undefined,
+        signal,
+      };
       const result =
         generationMode === "multi"
           ? await generateSOWMultiPass(params, features, setProgress)
@@ -362,7 +436,7 @@ export default function AiSowGenerator(): React.JSX.Element {
         template,
         requirements,
         additional,
-        methodology,
+        methodology: await resolveMethodology(signal),
         clarifications,
         apiKeyOverride: customApiKey.trim() || undefined,
         signal,
@@ -420,14 +494,11 @@ export default function AiSowGenerator(): React.JSX.Element {
     document.body.removeChild(link);
   };
 
-  // Restore demo inputs and sample output
+  // Restore the demo template, constraints and default system prompt
   const handleLoadDemo = (): void => {
     setTemplate(DEMO_SOW_TEMPLATE);
-    setRequirements(DEMO_RAW_REQUIREMENTS);
     setAdditional(DEMO_ADDITIONAL_CONSTRAINTS);
     setSystemPrompt(DEFAULT_SDD_SYSTEM_PROMPT);
-    setSowOutput(buildDemoSowOutput());
-    setWarnings([]);
     resetClarifications();
     setError("");
   };
@@ -437,7 +508,8 @@ export default function AiSowGenerator(): React.JSX.Element {
     setTemplate("");
     setRequirements("");
     setAdditional("");
-    setMethodology("");
+    setMethodologyOverride("");
+    setCondensedMethodology(null);
     setSowOutput("");
     setWarnings([]);
     resetClarifications();
@@ -465,7 +537,7 @@ export default function AiSowGenerator(): React.JSX.Element {
             <button
               onClick={handleLoadDemo}
               className="flex items-center gap-1 px-2.5 py-1 text-xs text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-              title="Restore demo inputs and sample output"
+              title="Restore the demo template, constraints and default system prompt"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Load Demo</span>
@@ -718,62 +790,192 @@ export default function AiSowGenerator(): React.JSX.Element {
             )}
           </div>
 
-          {/* SDD METHODOLOGY (OPTIONAL) */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-slate-300">
-                SDD Methodology{" "}
-                <span className="text-slate-500">(Optional)</span>
-              </label>
-              <div className="flex items-center gap-2">
-                <ClearButton
-                  onClear={() => setMethodology("")}
-                  disabled={!methodology}
-                  label="SDD methodology"
-                />
-                <div className="flex bg-slate-800 rounded p-0.5 text-xs">
-                  <button
-                    onClick={() => setMethodologyMode("text")}
-                    className={`px-2 py-1 rounded ${methodologyMode === "text" ? "bg-blue-600 text-white" : "text-slate-400"}`}
-                  >
-                    Text
-                  </button>
-                  <button
-                    onClick={() => setMethodologyMode("file")}
-                    className={`px-2 py-1 rounded ${methodologyMode === "file" ? "bg-blue-600 text-white" : "text-slate-400"}`}
-                  >
-                    File
-                  </button>
-                </div>
+          {/* SDD METHODOLOGY OVERRIDES (OPTIONAL) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setShowMethodology(!showMethodology)}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition-colors"
+            >
+              <div className="flex flex-wrap items-center gap-2 text-left">
+                <BookOpen className="w-4 h-4 text-cyan-400" />
+                <span>SDD Methodology Overrides (Optional)</span>
+                <span
+                  className={`normal-case tracking-normal font-medium px-1.5 py-0.5 rounded-full text-[10px] ${
+                    overrideText
+                      ? "bg-amber-500/15 text-amber-300"
+                      : "bg-slate-800 text-slate-400"
+                  }`}
+                  title="Methodology applied to every analysis and generation request"
+                >
+                  {overrideText
+                    ? `Override: ${activeMethodologyLabel}`
+                    : BUILT_IN_METHODOLOGY_LABEL}
+                </span>
               </div>
-            </div>
-            <p className="text-xs text-slate-500">
-              Describe how the generated SOW is consumed by your SDD framework
-              (required sections, ID formats, traceability). It is injected into
-              the system prompt.
-            </p>
-            {methodologyMode === "text" ? (
-              <textarea
-                rows={6}
-                value={methodology}
-                onChange={(e) => setMethodology(e.target.value)}
-                placeholder="Paste your SDD methodology document..."
-                className="w-full bg-slate-900 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-300 focus:outline-none focus:border-blue-500 resize-y"
-              />
-            ) : (
-              <input
-                type="file"
-                accept=".txt,.md,.json"
-                onChange={(e) => handleFileUpload(e, setMethodology)}
-                className="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700"
-              />
-            )}
-            {methodology && (
-              <p className="text-xs text-slate-500 text-right">
-                {methodology.length.toLocaleString()} characters (~
-                {Math.ceil(methodology.length / 4).toLocaleString()} tokens)
-                added to each request
-              </p>
+              {showMethodology ? (
+                <ChevronUp className="w-4 h-4 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 shrink-0" />
+              )}
+            </button>
+
+            {showMethodology && (
+              <div className="p-4 border-t border-slate-800 bg-slate-950/60 space-y-3">
+                <p className="text-xs text-slate-400">
+                  By default, the built-in SDD methodology is applied to every
+                  analysis and generation. Paste or upload a new methodology
+                  version here to{" "}
+                  <strong className="text-slate-300">
+                    replace it entirely
+                  </strong>
+                  . For project-specific rules, use Additional Constraints
+                  instead.
+                </p>
+                <p className="flex items-start gap-1.5 p-2 text-xs text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg">
+                  <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+                  <span>
+                    Changing the default SDD methodology may consume a
+                    significant amount of tokens.
+                  </span>
+                </p>
+
+                <div>
+                  <button
+                    onClick={() =>
+                      setShowBuiltInMethodology(!showBuiltInMethodology)
+                    }
+                    className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                  >
+                    {showBuiltInMethodology ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                    {showBuiltInMethodology ? "Hide" : "View"} built-in
+                    methodology (~
+                    {estimateTokens(
+                      DEFAULT_METHODOLOGY_PROFILE,
+                    ).toLocaleString()}{" "}
+                    tokens per request)
+                  </button>
+                  {showBuiltInMethodology && (
+                    <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap p-3 bg-slate-950 border border-slate-800 rounded-lg text-[11px] text-slate-400 font-mono">
+                      {DEFAULT_METHODOLOGY_PROFILE}
+                    </pre>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-slate-300">
+                    Methodology override
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <ClearButton
+                      onClear={() => setMethodologyOverride("")}
+                      disabled={!methodologyOverride}
+                      label="SDD methodology override"
+                    />
+                    <div className="flex bg-slate-800 rounded p-0.5 text-xs">
+                      <button
+                        onClick={() => setMethodologyMode("text")}
+                        className={`px-2 py-1 rounded ${methodologyMode === "text" ? "bg-blue-600 text-white" : "text-slate-400"}`}
+                      >
+                        Text
+                      </button>
+                      <button
+                        onClick={() => setMethodologyMode("file")}
+                        className={`px-2 py-1 rounded ${methodologyMode === "file" ? "bg-blue-600 text-white" : "text-slate-400"}`}
+                      >
+                        File
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {methodologyMode === "text" ? (
+                  <textarea
+                    rows={6}
+                    value={methodologyOverride}
+                    onChange={(e) => setMethodologyOverride(e.target.value)}
+                    placeholder="Paste a new SDD methodology version to replace the built-in one..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-300 focus:outline-none focus:border-blue-500 resize-y"
+                  />
+                ) : (
+                  <input
+                    type="file"
+                    accept=".txt,.md,.json"
+                    onChange={(e) =>
+                      handleFileUpload(e, setMethodologyOverride)
+                    }
+                    className="w-full text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700"
+                  />
+                )}
+
+                {overrideText && (
+                  <div className="space-y-2 p-3 bg-slate-900 border border-slate-800 rounded-lg">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-slate-400">
+                        {condensedProfile ? (
+                          <>
+                            <span className="text-emerald-400 font-medium">
+                              Condensed:
+                            </span>{" "}
+                            ~{estimateTokens(condensedProfile).toLocaleString()}{" "}
+                            tokens per request instead of ~
+                            {estimateTokens(overrideText).toLocaleString()}.
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-amber-300 font-medium">
+                              Not condensed yet
+                            </span>{" "}
+                            (~{estimateTokens(overrideText).toLocaleString()}{" "}
+                            tokens). It will be condensed automatically, once,
+                            before the next analysis or generation.
+                          </>
+                        )}
+                      </p>
+                      <button
+                        onClick={handleCondense}
+                        disabled={isBusy}
+                        className="shrink-0 flex items-center gap-1 px-2 py-1 text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded border border-slate-700 transition-colors"
+                        title="Condense the override into a compact methodology profile"
+                      >
+                        {isCondensing ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Minimize2 className="w-3 h-3" />
+                        )}
+                        <span>
+                          {isCondensing
+                            ? "Condensing..."
+                            : condensedProfile
+                              ? "Re-condense"
+                              : "Condense now"}
+                        </span>
+                      </button>
+                    </div>
+                    {condensedProfile && (
+                      <>
+                        <label className="block text-xs text-slate-400">
+                          Condensed profile — sent with every request. Review
+                          it, and edit if anything important was lost.
+                        </label>
+                        <textarea
+                          rows={12}
+                          value={condensedMethodology?.profile ?? ""}
+                          onChange={(e) =>
+                            setCondensedMethodology({
+                              sourceHash: overrideHash,
+                              profile: e.target.value,
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-blue-500 resize-y"
+                        />
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
@@ -876,8 +1078,19 @@ export default function AiSowGenerator(): React.JSX.Element {
               onClick={handleCancel}
               className="w-full py-1.5 text-xs text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
             >
-              Cancel {isAnalyzing ? "analysis" : "generation"}
+              Cancel{" "}
+              {isCondensing
+                ? "condensing"
+                : isAnalyzing
+                  ? "analysis"
+                  : "generation"}
             </button>
+          )}
+          {isCondensing && (
+            <p className="text-[11px] text-amber-300 text-center flex items-center justify-center gap-1.5">
+              <RefreshCw className="w-3 h-3 animate-spin" />
+              Condensing the methodology override (one-time step)...
+            </p>
           )}
           <p className="text-[11px] text-slate-500 text-center">
             {clarifications.length > 0

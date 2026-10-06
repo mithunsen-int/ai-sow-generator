@@ -12,6 +12,7 @@ import type {
   ProviderConfig,
   ProviderId,
 } from "../types/sow";
+import { DEFAULT_METHODOLOGY_PROFILE } from "../data/methodologyProfile";
 
 export const PROVIDERS: Record<string, ProviderConfig> = {
   GEMINI: {
@@ -104,33 +105,34 @@ For EVERY single feature or module identified, you MUST detail:
 `;
 
 /**
- * Appends the optional SDD methodology to the system prompt so the model
- * shapes the SOW for the downstream SDD framework that will consume it.
+ * Appends the methodology layer to a prompt. Every pass gets exactly one
+ * methodology: the user's condensed override when given, otherwise the
+ * built-in profile. The app rules in the base prompt always take precedence.
  */
 export const buildSystemPrompt = (
   basePrompt: string,
   methodology?: string,
 ): string => {
-  const methodologyText = methodology?.trim();
-  if (!methodologyText) return basePrompt;
+  const profile = methodology?.trim() || DEFAULT_METHODOLOGY_PROFILE;
 
   return `${basePrompt}
 
 === SDD METHODOLOGY (DOWNSTREAM CONSUMER OF THIS SOW) ===
-${methodologyText}
+${profile}
 === END OF SDD METHODOLOGY ===
 
 HOW TO APPLY THE METHODOLOGY:
-1. The SOW you produce will be consumed by the SDD framework described above. Structure sections, requirement/acceptance-criteria IDs, naming, and traceability so that framework can parse and act on it directly.
-2. Precedence: the SOW TEMPLATE controls section order and headings; the METHODOLOGY controls ID formats, naming conventions, and the required content within each section. If the template omits content the methodology requires, add it in the most relevant section.
-3. Use the methodology only to shape the SOW. Do NOT restate, summarize, or quote the methodology itself in the output.`;
+1. The SOW will be consumed by the SDD framework described above. Structure sections, identifiers, naming, and traceability so that framework can parse and act on it directly.
+2. Precedence: the SOW TEMPLATE controls section order and headings; the METHODOLOGY controls identifier formats, naming conventions, and the required content within each section. If the template omits content the methodology requires, add it in the most relevant section.
+3. The zero-assumption rules and the output-format rules above always take precedence over the methodology.
+4. Use the methodology only to shape the work. Do NOT restate, summarize, or quote the methodology itself in the output.`;
 };
 
 const ANALYSIS_SYSTEM_PROMPT = `You are a Senior Business Analyst and Principal Software Architect performing discovery for Specification-Driven Delivery (SDD).
 You do NOT write the SOW. Your only job is to find every gap that would force an engineer or AI coding agent to guess while writing a feature spec. AI agents build exactly what is written, not what was meant: every question you fail to raise becomes a silent guess in the code, a test derived from the same wrong premise, and a defect found late. Interrogate the inputs the way a senior architect does before signing off a spec — sceptically, concretely, and from the perspective of each person and system involved.
 
 HOW TO ANALYSE (think this through internally; output only the JSON)
-1. Identify the features. One feature = one future spec with one clear intent. Split anything too broad to build and verify as a unit (e.g. a whole "module"), and flag requirements that cannot be placed in any feature.
+1. Identify the features. One feature = one future spec with one clear intent, as the SDD METHODOLOGY defines a spec. Split anything too broad to build and verify as a unit (e.g. a whole "module"), and flag requirements that cannot be placed in any feature.
 2. For each feature, reconstruct the end-to-end business journey and test it for completeness:
    - Who is the actor (and are there several user types or roles)? What triggers the journey, and is there more than one entry point?
    - At every step: what the user does, what the system does, what is stored, what the user sees, and what happens next.
@@ -163,14 +165,14 @@ QUESTION QUALITY
 - "options" lists concrete, mutually exclusive alternatives only where they exist; otherwise use an empty array. Options describe choices, never a recommended default.
 
 RULES
-1. Give each feature a slug: kebab-case, 3–5 words, naming a thing (no verbs), unique. Use "project" for cross-cutting questions.
+1. Give each feature an identifier ("slug") following the SDD METHODOLOGY's identifier rules; if it defines none, use kebab-case, 3–5 words, naming a thing (no verbs), unique. Use "project" as the feature value for cross-cutting questions.
 2. Raise a question for anything missing, ambiguous, conflicting, or left as an "X or Y" choice. Never answer your own questions and never assume a default.
 3. Do not ask about anything the inputs already state, or anything answered in the CLARIFICATIONS section. If an answer opens a new gap or a consequence, ask the follow-up question.
 4. Template content and example values (vendors, numbers, dates) are placeholders, not requirements.
 5. "blocking" is true when a feature's acceptance criteria, API contract, data model, or state transitions cannot be finalised without the answer, or when a guess would carry security, compliance, or financial risk.
 6. Order the questions by feature, and within a feature follow the order of the coverage areas above, so related questions sit together.
 7. Be exhaustive on real gaps and silent on non-gaps: raise every question a senior architect would need answered before signing off the specs, and no padding.
-8. IDs are "<slug>.Q01", "<slug>.Q02", … numbered per feature, and "project.Q01", … for cross-cutting questions. Reuse the ID of any previously asked question that is still open.
+8. Question IDs follow the SDD METHODOLOGY's identifier rules for questions; if it defines none, use "<slug>.Q01", "<slug>.Q02", … numbered per feature, and "project.Q01", … for cross-cutting questions. Reuse the ID of any previously asked question that is still open.
 
 Return ONLY a JSON object — no prose and no code fence — in exactly this shape:
 {

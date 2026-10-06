@@ -10,8 +10,8 @@ A browser-based tool that turns raw project requirements into a zero-ambiguity *
   1. **SOW Template:** the section structure the output must follow.
   2. **Raw Project Requirements** (required): features, workflows and user stories.
   3. **Additional Constraints:** tech stack, SLAs, security rules and out-of-scope items.
-  4. **SDD Methodology** (optional): describes how your downstream SDD framework consumes the SOW. It is added to the system prompt; the template controls section order, and the methodology controls ID formats, naming and the required content within sections.
-- **Demo data:** the inputs load pre-filled with a sample project (a multi-tenant inventory dashboard), together with a sample generated SOW, so you can see the expected format straight away.
+- **SDD methodology (built-in, with overrides):** a built-in SDD methodology profile (identifiers, required spec content, project-wide content, status and review rules, decision ownership) is applied to every analysis and generation request. To use a different methodology version, paste or upload it under **SDD Methodology Overrides**: it **replaces** the built-in profile entirely. Before first use, the override is **condensed** once into a compact profile with the same structure (one extra request, roughly 1k tokens instead of the full document on every call); you can review and edit the condensed profile, and it is re-condensed only when the override text changes. The template controls section order; the methodology controls identifier formats, naming and the required content within sections. Project-specific rules belong in Additional Constraints.
+- **Demo data:** the SOW Template and Additional Constraints load pre-filled with example content, so you can see the expected format straight away. Raw Project Requirements start empty.
 - **Per-field Clear buttons**, plus **Load Demo** and **Clear** (all fields) in the header.
 - **SDD System Prompt Config (Advanced):** a collapsible editor for the system prompt sent to the model, with a Reset button. If you leave it empty, the provider's built-in prompt is used.
 - **Analyze → Clarify → Generate:** before writing anything, **Analyze Inputs** asks the model to list every gap, ambiguity and blocker as structured questions, instead of assuming. Answer them (or pick a suggested option) in the **Clarifications** tab, mark any you want to keep open, and generate. Answers are treated as binding decisions, and unanswered questions stay in the SOW's Open Questions register as blockers. **Re-analyze with answers** catches follow-up questions.
@@ -69,8 +69,8 @@ npm run lint      # run oxlint
 ## Usage
 
 1. Choose a **Provider** and **Model** under *AI Engine Settings*.
-2. Fill in or upload the **SOW Template**, **Raw Project Requirements** and **Additional Constraints**. Click **Load Demo** at any time to see example inputs.
-3. Optionally, paste or upload your **SDD Methodology**, and open **SDD System Prompt Config** to adjust the instructions sent to the model.
+2. Fill in or upload the **SOW Template**, **Raw Project Requirements** and **Additional Constraints**. Click **Load Demo** at any time to restore the example template, constraints and system prompt (your requirements and output are left untouched).
+3. Optionally, open **SDD Methodology Overrides** to replace the built-in methodology with a new version, and **SDD System Prompt Config** to adjust the app instructions sent to the model.
 4. Click **1. Analyze Inputs**, then answer the questions in the **Clarifications** tab. Use **Re-analyze with answers** to catch follow-ups. (You can also skip straight to step 5.)
 5. Click **2. Create SOW** (or **Generate SOW with answers** in the Clarifications tab).
 6. Review the result in **Rendered Preview**, make small fixes in **Raw Markdown**, and check the **SDD Audit** score.
@@ -88,9 +88,11 @@ src/
 ├── ai-sow-generator-gemini.tsx  # Earlier single-provider (Gemini) prototype, kept for reference; not mounted
 ├── services/
 │   ├── aiProvider.ts            # Provider/model list, callModel(), prompt assembly, analysis, single-pass generation
+│   ├── methodology.ts           # Condenses a methodology override into a compact profile
 │   └── multiPass.ts             # Outline → per-feature → assembly generation pipeline
 ├── data/
-│   └── sowDemoData.ts           # Demo template, requirements, constraints, sample output, default system prompt
+│   ├── methodologyProfile.ts    # Built-in SDD methodology profile (replaced by a condensed override)
+│   └── sowDemoData.ts           # Demo template and constraints, default system prompt (app rules)
 ├── utils/
 │   ├── sddAudit.ts              # SDD readiness scoring heuristics
 │   ├── clarifications.ts        # Answer status helpers and re-analysis merge
