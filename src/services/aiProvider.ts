@@ -11,6 +11,8 @@ import type {
   GenerationResult,
   ProviderConfig,
   ProviderId,
+  TokenUsage,
+  UsageReporter,
 } from "../types/sow";
 import { DEFAULT_METHODOLOGY_PROFILE } from "../data/methodologyProfile";
 
@@ -198,18 +200,36 @@ export interface CallModelParams {
   /** Ask the provider for a JSON response where it supports that natively. */
   json?: boolean;
   signal?: AbortSignal;
+  /** Name of the pass, shown next to its token usage. */
+  label?: string;
+  onUsage?: UsageReporter;
 }
 
 export interface ModelResponse {
   text: string;
   /** The response stopped at the model's output limit and is incomplete. */
   truncated: boolean;
+  usage: TokenUsage;
 }
 
 /**
- * Single entry point to the three providers, shared by every generation pass
+ * Single entry point to the three providers, shared by every generation pass.
+ * Reports each completed request's token usage through onUsage.
  */
-export async function callModel({
+export async function callModel(
+  params: CallModelParams,
+): Promise<ModelResponse> {
+  const response = await requestModel(params);
+  params.onUsage?.({
+    ...response.usage,
+    label: params.label ?? "Request",
+    provider: params.provider,
+    model: params.model,
+  });
+  return response;
+}
+
+async function requestModel({
   provider,
   model,
   system,
@@ -237,10 +257,18 @@ export async function callModel({
       },
     });
 
+    const meta = response.usageMetadata;
     return {
       text: response.text || "",
       truncated:
         response.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS,
+      usage: {
+        inputTokens: meta?.promptTokenCount ?? 0,
+        cachedInputTokens: meta?.cachedContentTokenCount ?? 0,
+        // Thinking tokens are billed as output but reported separately
+        outputTokens:
+          (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0),
+      },
     };
   }
 
@@ -289,11 +317,22 @@ export async function callModel({
       .map((block) => block.text)
       .join("");
 
+    const { usage } = message;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
     return {
       text,
       truncated:
         message.stop_reason === "max_tokens" ||
         message.stop_reason === "model_context_window_exceeded",
+      usage: {
+        // input_tokens excludes cached tokens, so add both cache counts back
+        inputTokens:
+          usage.input_tokens +
+          cacheRead +
+          (usage.cache_creation_input_tokens ?? 0),
+        cachedInputTokens: cacheRead,
+        outputTokens: usage.output_tokens,
+      },
     };
   }
 
@@ -329,6 +368,12 @@ export async function callModel({
     return {
       text: choice?.message?.content || "",
       truncated: choice?.finish_reason === "length",
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        cachedInputTokens:
+          response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+      },
     };
   }
 
@@ -442,6 +487,7 @@ export async function analyzeRequirements({
   clarifications,
   apiKeyOverride,
   signal,
+  onUsage,
 }: AnalyzeParams): Promise<AnalysisResult> {
   const { text, truncated } = await callModel({
     provider,
@@ -456,6 +502,8 @@ export async function analyzeRequirements({
     apiKeyOverride,
     json: true,
     signal,
+    label: "Analysis",
+    onUsage,
   });
 
   if (truncated) {
@@ -481,6 +529,7 @@ export async function generateSOW({
   clarifications,
   apiKeyOverride,
   signal,
+  onUsage,
 }: GenerateSOWParams): Promise<GenerationResult> {
   const { text, truncated } = await callModel({
     provider,
@@ -497,6 +546,8 @@ export async function generateSOW({
     }),
     apiKeyOverride,
     signal,
+    label: "Single-pass generation",
+    onUsage,
   });
 
   return {

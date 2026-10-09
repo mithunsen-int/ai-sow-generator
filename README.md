@@ -16,6 +16,7 @@ A browser-based tool that turns raw project requirements into a zero-ambiguity *
 - **SDD System Prompt Config (Advanced):** a collapsible editor for the system prompt sent to the model, with a Reset button. If you leave it empty, the provider's built-in prompt is used.
 - **Analyze → Clarify → Generate:** before writing anything, **Analyze Inputs** asks the model to list every gap, ambiguity and blocker as structured questions, instead of assuming. Answer them (or pick a suggested option) in the **Clarifications** tab, mark any you want to keep open, and generate. Answers are treated as binding decisions, and unanswered questions stay in the SOW's Open Questions register as blockers. **Re-analyze with answers** catches follow-up questions.
 - **Deep, SDD-ready feature specs:** the default prompt and template produce, for every feature, a slug (`<slug>.AC1`, `.API01`, `.UT01`, `.Q01` IDs), business rules with sources, roles and permissions, a proposed data model (fields, types, constraints), an API contract with a full exception table, Given/When/Then acceptance criteria, and spec-derived unit tests, plus a traceability matrix.
+- **Token usage:** a bar under the output header shows the tokens used by the current action (Analysis, Create SOW or Condense methodology), updating as each request completes, and the session total. **Details** lists every request in the current action (pass, model, input, cached input, output); **Reset totals** clears the counts. Figures come from each provider's response; thinking/reasoning tokens count as output.
 - **Output tabs:**
   - **Rendered Preview:** GitHub-flavoured Markdown rendering, including tables and checklists.
   - **Raw Markdown:** an editable source view; your edits carry through to the preview and the export.
@@ -84,7 +85,8 @@ src/
 ├── ai-sow-generator.tsx         # Main UI: inputs, settings, output tabs
 ├── components/
 │   ├── ClarificationsPanel.tsx  # Analysis questions, answers and the regenerate loop
-│   └── GenerationProgressPanel.tsx # Live progress of a multi-pass run
+│   ├── GenerationProgressPanel.tsx # Live progress of a multi-pass run
+│   └── TokenUsageBar.tsx        # Running and session token usage
 ├── ai-sow-generator-gemini.tsx  # Earlier single-provider (Gemini) prototype, kept for reference; not mounted
 ├── services/
 │   ├── aiProvider.ts            # Provider/model list, callModel(), prompt assembly, analysis, single-pass generation

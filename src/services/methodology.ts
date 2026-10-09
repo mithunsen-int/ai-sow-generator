@@ -3,7 +3,7 @@
 // the same structure as the built-in one, so it can replace the built-in
 // methodology on every pass without resending the full document each time.
 
-import type { ProviderId } from "../types/sow";
+import type { ProviderId, UsageReporter } from "../types/sow";
 import { unwrapMarkdownFence } from "../utils/markdown";
 import { callModel } from "./aiProvider";
 
@@ -35,6 +35,7 @@ interface CondenseParams {
   document: string;
   apiKeyOverride?: string;
   signal?: AbortSignal;
+  onUsage?: UsageReporter;
 }
 
 /** One call: full methodology document in, compact profile out. */
@@ -44,6 +45,7 @@ export async function condenseMethodology({
   document,
   apiKeyOverride,
   signal,
+  onUsage,
 }: CondenseParams): Promise<string> {
   const { text, truncated } = await callModel({
     provider,
@@ -52,6 +54,8 @@ export async function condenseMethodology({
     prompt: `=== METHODOLOGY DOCUMENT ===\n${document.trim()}\n=== END OF METHODOLOGY DOCUMENT ===`,
     apiKeyOverride,
     signal,
+    label: "Condense methodology",
+    onUsage,
   });
 
   const profile = unwrapMarkdownFence(text);

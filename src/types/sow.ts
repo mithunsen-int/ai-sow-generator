@@ -26,6 +26,32 @@ export interface GenerateSOWParams {
   clarifications?: Clarification[];
   apiKeyOverride?: string;
   signal?: AbortSignal;
+  /** Called once per completed model request with its token usage. */
+  onUsage?: UsageReporter;
+}
+
+/** Token counts for one model request, normalised across providers. */
+export interface TokenUsage {
+  /** All input tokens, including any served from the provider's cache. */
+  inputTokens: number;
+  /** The part of inputTokens read from the prompt cache. */
+  cachedInputTokens: number;
+  /** Generated tokens, including any thinking / reasoning tokens. */
+  outputTokens: number;
+}
+
+export interface UsageEvent extends TokenUsage {
+  /** Which pass made the request, e.g. "Analysis" or "Feature: User Login". */
+  label: string;
+  provider: ProviderId;
+  model: string;
+}
+
+export type UsageReporter = (event: UsageEvent) => void;
+
+/** A usage event tagged with the user action ("run") that made it. */
+export interface LoggedUsage extends UsageEvent {
+  runId: number;
 }
 
 export type GenerationMode = "multi" | "single";

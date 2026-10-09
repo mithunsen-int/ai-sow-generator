@@ -167,8 +167,9 @@ export async function generateSOWMultiPass(
     clarifications,
     apiKeyOverride,
     signal,
+    onUsage,
   } = params;
-  const call = { provider, model, apiKeyOverride, signal };
+  const call = { provider, model, apiKeyOverride, signal, onUsage };
   const inputs = buildInputsPrompt({
     template,
     requirements,
@@ -191,6 +192,7 @@ export async function generateSOWMultiPass(
     system: buildSystemPrompt(OUTLINE_SYSTEM_PROMPT, methodology),
     prompt: inputs + known,
     json: true,
+    label: "Outline",
   });
   if (outlineResponse.truncated) {
     throw new Error(
@@ -225,6 +227,10 @@ export async function generateSOWMultiPass(
           ...call,
           system: sddSystem,
           prompt,
+          label:
+            attempt === 1
+              ? `Feature: ${feature.name}`
+              : `Feature: ${feature.name} (retry)`,
         });
         statuses[i].status = truncated ? "truncated" : "done";
         if (truncated) {
@@ -257,6 +263,7 @@ export async function generateSOWMultiPass(
     ...call,
     system: sddSystem,
     prompt: `${inputs}\n\n${outlineText}\n\n=== GENERATED FEATURE SPECIFICATIONS (already final — do not rewrite) ===\n${featureBlocks}\n\n${assemblyTask()}`,
+    label: "Assembly",
   });
   if (assembly.truncated) {
     warnings.push(

@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Code,
   Copy,
+  Cpu,
   Download,
   Eraser,
   Eye,
@@ -38,6 +39,7 @@ import {
   methodologyLabel,
 } from "./data/methodologyProfile";
 import GenerationProgressPanel from "./components/GenerationProgressPanel";
+import TokenUsageBar from "./components/TokenUsageBar";
 import {
   PROVIDERS,
   analyzeRequirements,
@@ -51,7 +53,9 @@ import type {
   GenerationMode,
   GenerationProgress,
   InputMode,
+  LoggedUsage,
   ProviderId,
+  UsageReporter,
 } from "./types/sow";
 import {
   countUnresolvedBlocking,
@@ -192,13 +196,43 @@ function ClearButton({
   );
 }
 
+// Default AI engine settings, also used to label the settings summary
+const DEFAULT_ENGINE: {
+  provider: ProviderId;
+  model: string;
+  mode: GenerationMode;
+} = { provider: "openai", model: "gpt-4o", mode: "multi" };
+
 export default function AiSowGenerator(): React.JSX.Element {
   // Config & State
-  const [selectedProvider, setSelectedProvider] =
-    useState<ProviderId>("openai");
-  const [selectedModel, setSelectedModel] = useState<string>("gpt-4o");
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>(
+    DEFAULT_ENGINE.provider,
+  );
+  const [selectedModel, setSelectedModel] = useState<string>(
+    DEFAULT_ENGINE.model,
+  );
   const [customApiKey, setCustomApiKey] = useState<string>("");
-  const [generationMode, setGenerationMode] = useState<GenerationMode>("multi");
+  const [generationMode, setGenerationMode] = useState<GenerationMode>(
+    DEFAULT_ENGINE.mode,
+  );
+  const [showEngineSettings, setShowEngineSettings] = useState<boolean>(false);
+
+  // Summary of the current engine selection, shown on the collapsed header
+  const providerConfig = Object.values(PROVIDERS).find(
+    (p) => p.id === selectedProvider,
+  );
+  const modelName =
+    providerConfig?.models
+      .find((m) => m.id === selectedModel)
+      ?.name.replace(/\s*\(.*\)$/, "") ?? selectedModel;
+  const engineSummary = `${providerConfig?.name ?? selectedProvider} · ${modelName} · ${
+    generationMode === "multi" ? "Multi-pass" : "Single pass"
+  }`;
+  const isDefaultEngine =
+    selectedProvider === DEFAULT_ENGINE.provider &&
+    selectedModel === DEFAULT_ENGINE.model &&
+    generationMode === DEFAULT_ENGINE.mode &&
+    !customApiKey;
 
   // Input States (template and constraints pre-filled to show the expected format)
   const [template, setTemplate] = useState<string>(DEMO_SOW_TEMPLATE);
@@ -240,6 +274,14 @@ export default function AiSowGenerator(): React.JSX.Element {
   const [warnings, setWarnings] = useState<string[]>([]);
   // Aborts the in-flight analysis or generation request(s)
   const abortRef = useRef<AbortController | null>(null);
+
+  // Token usage: every completed request, tagged with the action that made it
+  const [usageLog, setUsageLog] = useState<LoggedUsage[]>([]);
+  const [currentRun, setCurrentRun] = useState<{ id: number; name: string }>({
+    id: 0,
+    name: "",
+  });
+  const runCounter = useRef<number>(0);
 
   // Clarifications (Analyze -> answer -> Generate loop)
   const [clarifications, setClarifications] = useState<Clarification[]>([]);
@@ -295,6 +337,18 @@ export default function AiSowGenerator(): React.JSX.Element {
     abortRef.current?.abort();
   };
 
+  /** Starts a named run and returns the reporter its requests log usage to. */
+  const beginRun = (name: string): UsageReporter => {
+    const id = ++runCounter.current;
+    setCurrentRun({ id, name });
+    return (event) => setUsageLog((prev) => [...prev, { ...event, runId: id }]);
+  };
+
+  const handleResetUsage = (): void => {
+    setUsageLog([]);
+    setCurrentRun({ id: 0, name: "" });
+  };
+
   /**
    * The methodology layer for the next request: the built-in profile when no
    * override is given, otherwise the condensed override (condensing it first,
@@ -302,6 +356,7 @@ export default function AiSowGenerator(): React.JSX.Element {
    */
   const resolveMethodology = async (
     signal: AbortSignal,
+    onUsage: UsageReporter,
     force = false,
   ): Promise<string> => {
     if (!overrideText) return DEFAULT_METHODOLOGY_PROFILE;
@@ -315,6 +370,7 @@ export default function AiSowGenerator(): React.JSX.Element {
         document: overrideText,
         apiKeyOverride: customApiKey.trim() || undefined,
         signal,
+        onUsage,
       });
       setCondensedMethodology({ sourceHash: overrideHash, profile });
       return profile;
@@ -325,9 +381,10 @@ export default function AiSowGenerator(): React.JSX.Element {
 
   const handleCondense = async (): Promise<void> => {
     const signal = startRequest();
+    const onUsage = beginRun("Condense methodology");
     setError("");
     try {
-      await resolveMethodology(signal, true);
+      await resolveMethodology(signal, onUsage, true);
     } catch (err: unknown) {
       setError(
         signal.aborted
@@ -377,6 +434,7 @@ export default function AiSowGenerator(): React.JSX.Element {
     }
 
     const signal = startRequest();
+    const onUsage = beginRun("Create SOW");
     setIsLoading(true);
     setError("");
     setWarnings([]);
@@ -390,11 +448,12 @@ export default function AiSowGenerator(): React.JSX.Element {
         template,
         requirements,
         additional,
-        methodology: await resolveMethodology(signal),
+        methodology: await resolveMethodology(signal, onUsage),
         systemPrompt,
         clarifications,
         apiKeyOverride: customApiKey.trim() || undefined,
         signal,
+        onUsage,
       };
       const result =
         generationMode === "multi"
@@ -425,6 +484,7 @@ export default function AiSowGenerator(): React.JSX.Element {
     }
 
     const signal = startRequest();
+    const onUsage = beginRun("Analysis");
     setIsAnalyzing(true);
     setError("");
     setActiveTab("clarify");
@@ -436,10 +496,11 @@ export default function AiSowGenerator(): React.JSX.Element {
         template,
         requirements,
         additional,
-        methodology: await resolveMethodology(signal),
+        methodology: await resolveMethodology(signal, onUsage),
         clarifications,
         apiKeyOverride: customApiKey.trim() || undefined,
         signal,
+        onUsage,
       });
       setClarifications((prev) => mergeClarifications(prev, result.questions));
       setFeatures(result.features);
@@ -555,100 +616,134 @@ export default function AiSowGenerator(): React.JSX.Element {
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* AI MODEL CONFIGURATION */}
-          <div className="p-4 bg-slate-900 rounded-xl border border-slate-800 space-y-4">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              AI Engine Settings
-            </h2>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">
-                  Provider
-                </label>
-                <select
-                  value={selectedProvider}
-                  onChange={handleProviderChange}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setShowEngineSettings(!showEngineSettings)}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition-colors"
+            >
+              <div className="flex flex-wrap items-center gap-2 text-left">
+                <Cpu className="w-4 h-4 text-blue-400" />
+                <span>AI Engine Settings</span>
+                <span
+                  className="normal-case tracking-normal font-medium text-slate-300"
+                  title="Current provider, model and generation mode"
                 >
-                  {Object.values(PROVIDERS).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">
-                  Model
-                </label>
-                <select
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  {engineSummary}
+                </span>
+                <span
+                  className={`normal-case tracking-normal font-medium px-1.5 py-0.5 rounded-full text-[10px] ${
+                    isDefaultEngine
+                      ? "bg-slate-800 text-slate-400"
+                      : "bg-blue-500/15 text-blue-300"
+                  }`}
                 >
-                  {Object.values(PROVIDERS)
-                    .find((p) => p.id === selectedProvider)
-                    ?.models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}
-                      </option>
-                    ))}
-                </select>
+                  {isDefaultEngine
+                    ? "Default"
+                    : customApiKey
+                      ? "Custom · own API key"
+                      : "Custom"}
+                </span>
               </div>
-            </div>
+              {showEngineSettings ? (
+                <ChevronUp className="w-4 h-4 shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 shrink-0" />
+              )}
+            </button>
 
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">
-                Generation Mode
-              </label>
-              <select
-                value={generationMode}
-                onChange={(e) =>
-                  setGenerationMode(e.target.value as GenerationMode)
-                }
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="multi">
-                  Multi-pass — deep spec per feature (recommended)
-                </option>
-                <option value="single">
-                  Single pass — one request, faster and cheaper
-                </option>
-              </select>
-              <p className="text-[11px] text-slate-500 mt-1">
-                {generationMode === "multi"
-                  ? "Outline, then one request per feature, then assembly. Stays within output limits on large projects; costs more requests."
-                  : "Best for small projects. Large SOWs may hit the model's output limit."}
-              </p>
-            </div>
+            {showEngineSettings && (
+              <div className="p-4 border-t border-slate-800 bg-slate-950/60 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">
+                      Provider
+                    </label>
+                    <select
+                      value={selectedProvider}
+                      onChange={handleProviderChange}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {Object.values(PROVIDERS).map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">
-                Custom API Key{" "}
-                <span className="text-slate-500">(Optional override)</span>
-              </label>
-              <div className="relative">
-                <input
-                  type="password"
-                  placeholder={`Enter custom ${selectedProvider} API key...`}
-                  value={customApiKey}
-                  onChange={(e) => setCustomApiKey(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-3 pr-8 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                {customApiKey && (
-                  <button
-                    type="button"
-                    onClick={() => setCustomApiKey("")}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-200 rounded"
-                    title="Clear API key"
-                    aria-label="Clear API key"
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">
+                      Model
+                    </label>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {Object.values(PROVIDERS)
+                        .find((p) => p.id === selectedProvider)
+                        ?.models.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">
+                    Generation Mode
+                  </label>
+                  <select
+                    value={generationMode}
+                    onChange={(e) =>
+                      setGenerationMode(e.target.value as GenerationMode)
+                    }
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+                    <option value="multi">
+                      Multi-pass — deep spec per feature (recommended)
+                    </option>
+                    <option value="single">
+                      Single pass — one request, faster and cheaper
+                    </option>
+                  </select>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    {generationMode === "multi"
+                      ? "Outline, then one request per feature, then assembly. Stays within output limits on large projects; costs more requests."
+                      : "Best for small projects. Large SOWs may hit the model's output limit."}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">
+                    Custom API Key{" "}
+                    <span className="text-slate-500">(Optional override)</span>
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="password"
+                      placeholder={`Enter custom ${selectedProvider} API key...`}
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-3 pr-8 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    {customApiKey && (
+                      <button
+                        type="button"
+                        onClick={() => setCustomApiKey("")}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-200 rounded"
+                        title="Clear API key"
+                        aria-label="Clear API key"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           {/* SOW TEMPLATE INPUT */}
@@ -1183,6 +1278,14 @@ export default function AiSowGenerator(): React.JSX.Element {
             </button>
           </div>
         </header>
+
+        <TokenUsageBar
+          log={usageLog}
+          currentRunId={currentRun.id}
+          currentRunName={currentRun.name}
+          isRunning={isBusy}
+          onReset={handleResetUsage}
+        />
 
         {/* TAB CONTENTS */}
         <div className="flex-1 overflow-y-auto p-6">
